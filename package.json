@@ -1,0 +1,42 @@
+{
+  "name": "financeadvisor",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "postinstall": "prisma generate",
+    "set-webhook": "node set-webhook.js"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.27",
+    "@ai-sdk/google": "^4.0.29",
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@prisma/client": "^6.3.0",
+    "ai": "^7.0.44",
+    "axios": "^1.19.0",
+    "lucide-react": "^1.28.0",
+    "next": "16.2.12",
+    "openai": "^7.3.0",
+    "pdf-parse": "^2.4.5",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "unpdf": "^1.8.0",
+    "voyageai": "^0.4.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.12",
+    "prisma": "^6.3.0",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

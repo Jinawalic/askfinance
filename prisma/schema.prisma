@@ -1,0 +1,118 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"] // Enable support for pgvector
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector] // Declare the vector extension at the database level
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SenderType {
+  USER
+  AI
+}
+
+enum TransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum TelegramSender {
+  USER
+  BOT
+}
+
+model User {
+  id               String             @id @default(uuid())
+  name             String?            // kept for backward compat with existing web sessions
+  username         String             @unique // unique web login key & Telegram start payload
+  email            String?            @unique
+  telegramChatId   String?            @unique // linked when user sends /start <username>
+  sessions         ChatSession[]
+  telegramMessages TelegramMessage[]
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+}
+
+// Stores all Telegram messages per user — fully isolated by userId
+model TelegramMessage {
+  id        String         @id @default(uuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      TelegramSender
+  text      String         @db.Text
+  createdAt DateTime       @default(now())
+}
+
+model ChatSession {
+  id               String            @id @default(uuid())
+  title            String
+  userId           String?
+  user             User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages         Message[]
+  transactions     Transaction[]
+  financialSummary FinancialSummary?
+  chunks           DocumentChunk[]   // Relation to map stored statement vectors to this session
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+}
+
+model Message {
+  id        String      @id @default(uuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sender    SenderType
+  text      String      @db.Text
+  fileName  String?
+  createdAt DateTime    @default(now())
+}
+
+model Transaction {
+  id          String          @id @default(uuid())
+  sessionId   String?
+  session     ChatSession?    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  date        String
+  description String
+  amount      Float
+  type        TransactionType
+  category    String?
+  risk        RiskLevel       @default(LOW)
+  createdAt   DateTime        @default(now())
+}
+
+model FinancialSummary {
+  id                  String      @id @default(uuid())
+  sessionId           String      @unique
+  session             ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  totalInflow         Float
+  totalOutflow        Float
+  netSavings          Float
+  savingsRatePercent  Int
+  categories          Json
+  createdAt           DateTime    @default(now())
+}
+
+// NEW: Model built explicitly to hold Voyage AI vector embeddings for RAG search
+model DocumentChunk {
+  id        String      @id @default(uuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  content   String      @db.Text
+  
+  // Unsupported type explicitly binds vector dimensions to match voyage-finance-2 (1024)
+  embedding Unsupported("vector(1024)")
+  
+  createdAt DateTime    @default(now())
+}
