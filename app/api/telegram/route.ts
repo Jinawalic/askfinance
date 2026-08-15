@@ -496,6 +496,6 @@ Rules:
   } catch (err: unknown) {
     const errorDetails = err instanceof Error ? err.message : String(err);
     console.error('[Claude API Error in Telegram Handler]:', errorDetails);
-    return "I am having trouble connecting to my AI service right now. Please try again in a moment.";
+    return "I am having trouble connecting to my AI service right now. Please try again shortly.";
   }
 }
