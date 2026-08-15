@@ -210,7 +210,7 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
     return NextResponse.json({ ok: true });
   }
 
-  await sendMessage(chatId, `Analyzing statement "${fileName}"... Please give me a few moments.`);
+  await sendMessage(chatId, `Analyzing statement "${fileName}"... Please give me a few moment.`);
 
   try {
     // 1. Retrieve the downloadable file URL from Telegram Bot API
