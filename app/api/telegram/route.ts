@@ -439,12 +439,30 @@ Expense Categories: ${JSON.stringify(summary.categories)}`;
     take: 20,
   });
 
-  const priorMessages = history.slice(0, -1);
-  const messages: { role: 'user' | 'assistant'; content: string }[] = priorMessages.map((m) => ({
-    role: m.role === 'USER' ? 'user' : 'assistant',
-    content: m.text,
-  }));
-  messages.push({ role: 'user', content: userQuery });
+  // Build clean alternating messages array for Anthropic
+  const messages: { role: 'user' | 'assistant'; content: string }[] = [];
+  for (const m of history.slice(0, -1)) {
+    const role = m.role === 'USER' ? 'user' : 'assistant';
+    if (m.text && m.text.trim()) {
+      if (messages.length > 0 && messages[messages.length - 1].role === role) {
+        messages[messages.length - 1].content += '\n' + m.text.trim();
+      } else {
+        messages.push({ role, content: m.text.trim() });
+      }
+    }
+  }
+
+  // Ensure message history starts with 'user'
+  while (messages.length > 0 && messages[0].role !== 'user') {
+    messages.shift();
+  }
+
+  // Add the current user query
+  if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
+    messages[messages.length - 1].content = userQuery;
+  } else {
+    messages.push({ role: 'user', content: userQuery });
+  }
 
   // 5. Build Comprehensive System Prompt
   const systemPrompt = `You are Finance AI, an expert professional financial advisor.
@@ -466,7 +484,7 @@ Rules:
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const response = await client.messages.create({
-      model: 'claude-3-5-haiku-20241022',
+      model: 'claude-sonnet-5',
       max_tokens: 1024,
       system: systemPrompt,
       messages,
@@ -475,8 +493,9 @@ Rules:
     const textBlock = response.content.find((b) => b.type === 'text');
     const rawResponse = textBlock?.text ?? "I'm sorry, I couldn't generate a response. Please try again.";
     return formatCleanText(rawResponse);
-  } catch (err) {
-    console.error('[Claude API Error in Telegram Handler]:', err);
+  } catch (err: unknown) {
+    const errorDetails = err instanceof Error ? err.message : String(err);
+    console.error('[Claude API Error in Telegram Handler]:', errorDetails);
     return "I am having trouble connecting to my AI service right now. Please try again in a moment.";
   }
 }
