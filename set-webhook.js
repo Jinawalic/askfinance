@@ -1,40 +1,65 @@
 /**
  * set-webhook.js
- * Run this whenever you start a new localtunnel session to update Telegram's webhook.
+ * Utility to check, set, or delete Telegram Bot Webhook.
  *
  * Usage:
- *   node set-webhook.js https://your-tunnel-url.loca.lt
- *
- * Or with auto-detection (reads the tunnel URL from the running localtunnel process):
- *   node set-webhook.js
+ *   node set-webhook.js https://your-public-url.com
+ *   node set-webhook.js --info
+ *   node set-webhook.js --delete
  */
 
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8767722632:AAERn7tPHJOXgOXXiNRuT0Sf8GPsn4rwO90';
-const tunnelUrl = process.argv[2];
-
-if (!tunnelUrl) {
-  console.error('Usage: node set-webhook.js https://<your-tunnel>.loca.lt');
-  process.exit(1);
+// Try loading token from .env or .env.local if not already in process.env
+function loadEnvToken() {
+  if (process.env.TELEGRAM_BOT_TOKEN) return process.env.TELEGRAM_BOT_TOKEN;
+  const envFiles = ['.env.local', '.env'];
+  for (const file of envFiles) {
+    const filePath = path.resolve(process.cwd(), file);
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const match = content.match(/TELEGRAM_BOT_TOKEN\s*=\s*["']?([^"'\r\n]+)["']?/);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+  }
+  return '8767722632:AAERn7tPHJOXgOXXiNRuT0Sf8GPsn4rwO90';
 }
 
-const webhookUrl = `${tunnelUrl.replace(/\/$/, '')}/api/telegram`;
-const apiUrl = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}`;
+const BOT_TOKEN = loadEnvToken();
+const arg = process.argv[2];
 
-console.log(`Setting webhook to: ${webhookUrl}`);
-
-https.get(apiUrl, (res) => {
-  let data = '';
-  res.on('data', (chunk) => (data += chunk));
-  res.on('end', () => {
-    const result = JSON.parse(data);
-    if (result.ok) {
-      console.log('✅ Webhook set successfully!');
-    } else {
-      console.error('❌ Failed:', result.description);
-    }
+function makeTelegramRequest(endpoint) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/${endpoint}`;
+  https.get(url, (res) => {
+    let data = '';
+    res.on('data', (chunk) => (data += chunk));
+    res.on('end', () => {
+      try {
+        const result = JSON.parse(data);
+        console.log(JSON.stringify(result, null, 2));
+      } catch {
+        console.log(data);
+      }
+    });
+  }).on('error', (err) => {
+    console.error('Request error:', err.message);
   });
-}).on('error', (err) => {
-  console.error('Request error:', err.message);
-});
+}
+
+if (!arg || arg === '--info' || arg === '-i') {
+  console.log(`Checking current webhook status for bot...`);
+  makeTelegramRequest('getWebhookInfo');
+} else if (arg === '--delete' || arg === '-d') {
+  console.log(`Deleting Telegram webhook...`);
+  makeTelegramRequest('deleteWebhook?drop_pending_updates=true');
+} else {
+  const cleanUrl = arg.trim().replace(/\/$/, '');
+  const webhookUrl = cleanUrl.endsWith('/api/telegram') ? cleanUrl : `${cleanUrl}/api/telegram`;
+  console.log(`Setting webhook to: ${webhookUrl}`);
+  makeTelegramRequest(`setWebhook?url=${encodeURIComponent(webhookUrl)}&drop_pending_updates=true`);
+}
+

@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
-    "set-webhook": "node set-webhook.js"
+    "set-webhook": "node set-webhook.js",
+    "tunnel": "node start-tunnel.js",
+    "bot:poll": "node bot-polling.js"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.27",
@@ -37,6 +39,7 @@
     "eslint-config-next": "16.2.12",
     "prisma": "^6.3.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "untun": "^0.2.2"
   }
 }

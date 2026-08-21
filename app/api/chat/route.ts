@@ -182,8 +182,14 @@ Instructions:
         console.log(`[Anthropic API]: Requesting streaming completion from Claude for session: ${sessionId}`);
 
         // 6. Stream Claude AI response using Vercel AI SDK & Anthropic Provider
+        const MODELS = [
+            'claude-haiku-4-5-20251001',
+            'claude-sonnet-4-5-20250929',
+            'claude-sonnet-5',
+        ];
+        const modelName = process.env.ANTHROPIC_MODEL || MODELS[0];
         const result = streamText({
-            model: anthropic('claude-sonnet-5'),
+            model: anthropic(modelName),
             system: systemPrompt,
             messages: formattedMessages,
             onError: (err) => {
