@@ -20,18 +20,29 @@ function getBotApi(): string {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Format text into clean paragraph text without raw markdown asterisks or bullet dashes. */
+/** Send native Telegram typing indicator (preloading animated 3 dots) */
+async function sendTyping(chatId: number | string) {
+  try {
+    await axios.post(`${getBotApi()}/sendChatAction`, {
+      chat_id: chatId,
+      action: 'typing',
+    });
+  } catch {
+    // Ignore typing indicator errors silently
+  }
+}
+
+/** Format text into clean, concise structured text with bullet points. */
 function formatCleanText(text: string): string {
   if (!text) return '';
   return text
-    // Remove markdown bold/italic asterisks
+    // Replace markdown bold/italic asterisks with clean text
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     // Remove markdown headers (# Title -> Title)
     .replace(/^#{1,6}\s+/gm, '')
-    // Replace bullet dashes/asterisks at start of lines with clean indentation
-    .replace(/^[-*]\s+/gm, '')
-    .replace(/^[•]\s+/gm, '')
+    // Normalize bullet dashes/asterisks at start of lines into clean round bullet dots
+    .replace(/^[-*]\s+/gm, '• ')
     // Remove markdown code backticks
     .replace(/`([^`]+)`/g, '$1')
     // Remove any remaining stray asterisks
@@ -68,6 +79,9 @@ export async function POST(req: NextRequest) {
     const chatId: number = message.chat.id;
     const text: string | undefined = message.text;
     const document = message.document;
+
+    // Send typing indicator (3 preloading dots) immediately
+    sendTyping(chatId);
 
     // ── 1. /start command — link chatId to the registered web username ──────
     if (text && text.startsWith('/start')) {
@@ -472,20 +486,20 @@ Expense Categories: ${JSON.stringify(summary.categories)}`;
     messages.push({ role: 'user', content: userQuery });
   }
 
-  // 5. Build Comprehensive System Prompt
-  const systemPrompt = `You are Finance AI, an expert professional financial advisor.
-You assist users with personalized financial advice, bank statement breakdown, budgeting strategies, and expense management.
+  // 5. Build Concise, Professional System Prompt
+  const systemPrompt = `You are Finance AI, a professional and concise financial advisor.
+Your responses must be short, structured, and direct to the point.
 
-${exactMatchContext ? `### Exact Database Transaction Matches:\n${exactMatchContext}\n` : ''}
-${summaryContext ? `### User's Financial Statement Summary:\n${summaryContext}\n` : ''}
-${ragContext ? `### Relevant Line Items from User's Bank Statement:\n${ragContext}\n` : ''}
+Format style:
+- Brief 1-line summary/introductory sentence.
+- 3 to 5 clear bullet points using "• Item: Description or Amount".
+- 1 short closing follow-up question or call to action.
+- Currency: Always use Nigerian Naira (₦) for amounts.
+- Do NOT generate lengthy paragraphs, rambling essays, or excessive text.
 
-Rules:
-1. Currency: ALWAYS use Nigerian Naira (₦) for all amounts, figures, and calculations. Never use dollar ($) or other currencies.
-2. Formatting: Write in clean, modern conversational paragraphs with clear line breaks. DO NOT use markdown bold asterisks (no ** or *) and DO NOT use bullet list dashes (no - or * list items). If listing points or steps, use clean numbering or separate paragraph blocks.
-3. Accuracy: If exact database transaction matches or statement summaries are provided above, use those exact figures to answer user queries with precision.
-4. Professionalism: Keep responses professional, encouraging, practical, and clear.
-5. If no bank statement context is available, provide general best-practice financial guidance.`;
+${exactMatchContext ? `### Exact Matches:\n${exactMatchContext}\n` : ''}
+${summaryContext ? `### Statement Summary:\n${summaryContext}\n` : ''}
+${ragContext ? `### Statement Context:\n${ragContext}\n` : ''}`;
 
   // 6. Direct Claude AI Execution using MODELS list
   const MODELS = [
@@ -503,7 +517,7 @@ Rules:
         try {
           const response = await client.messages.create({
             model: model,
-            max_tokens: 1024,
+            max_tokens: 512,
             system: systemPrompt,
             messages: messages.map((m) => ({
               role: m.role as 'user' | 'assistant',
@@ -514,7 +528,7 @@ Rules:
           const textBlock = response.content.find((b) => b.type === 'text');
           const rawResponse = textBlock?.text;
           if (rawResponse && rawResponse.trim()) {
-            console.log(`[Claude Direct]: Successfully generated response using model: ${model}`);
+            console.log(`[Claude Direct]: Generated concise response with: ${model}`);
             return formatCleanText(rawResponse);
           }
         } catch (modelErr: unknown) {
@@ -549,65 +563,83 @@ Rules:
     }
   }
 
-  // D. Intelligent Financial Advisory Fallback Engine (Answers directly with expert Nigerian Naira guidance)
+  // D. Intelligent Financial Advisory Fallback Engine (Concise & Structured like inspiration)
   return generateFinancialFallback(userQuery, exactMatchContext, summaryContext);
 }
 
-/** Built-in financial intelligence engine for immediate, reliable responses */
+/** Built-in concise financial intelligence engine */
 function generateFinancialFallback(query: string, matchContext: string, summaryContext: string): string {
   const q = query.toLowerCase();
 
   // Wedding Budgeting & Event Planning
   if (q.includes('wedding') || q.includes('marriage') || q.includes('event') || q.includes('party')) {
-    return `Planning a wedding in December is an exciting milestone! In Nigeria, December is peak celebration season, so early vendor booking is essential.
+    return `Here is your recommended December Wedding Budget breakdown:
 
-Here is a recommended wedding budget breakdown to guide your planning:
+• Food & Drinks (35%): Catering, small chops, and beverages
+• Venue & Decor (30%): Event hall and lighting/decoration
+• Attire & Rings (15%): Bride/Groom outfits, rings, and beauty
+• Media (10%): Photography and videography
+• Contingency (10%): Emergency buffer for peak December rates
 
-1. Venue and Decoration (30%)
-Allocate 30% of your total budget to the event hall, sound, lighting, and ambient floral decorations. Book early as December dates fill up quickly.
+What total budget amount in ₦ are you targeting for the event?`;
+  }
 
-2. Food, Drinks, and Catering (35%)
-Catering is the largest component. Budget for diverse Nigerian dishes, small chops, drinks, and cooling services based on your confirmed guest count.
+  // 80,000 or specific number budget
+  const numberMatch = query.match(/(\d[\d,]*)/);
+  if (numberMatch && (q.includes('budget') || q.includes('invest') || q.includes('save') || q.includes('spend'))) {
+    const rawNum = parseFloat(numberMatch[1].replace(/,/g, ''));
+    if (!isNaN(rawNum) && rawNum > 0) {
+      const needs = Math.round(rawNum * 0.5);
+      const wants = Math.round(rawNum * 0.3);
+      const savings = Math.round(rawNum * 0.2);
 
-3. Attire, Rings, and Beauty (15%)
-Includes the bride's gown, groom's suit, traditional outfits (Aso-Oke/George), wedding rings, makeup, and hair styling.
+      return `Here is your 50/30/20 budget plan for ₦${rawNum.toLocaleString()}:
 
-4. Photography and Videography (10%)
-Securing a professional media team ensures high quality memories of your special day.
+• Needs (50%): ₦${needs.toLocaleString()} (Food, transport, utilities)
+• Wants (30%): ₦${wants.toLocaleString()} (Personal care, leisure)
+• Savings & Investment (20%): ₦${savings.toLocaleString()} (Emergency fund)
 
-5. Miscellaneous and Contingency (10%)
-Always reserve at least 10% in emergency cash for unexpected expenses, logistics, and vendor tips.
+Would you like me to allocate this across specific expense categories?`;
+    }
+  }
 
-What total budget amount in Nigerian Naira (₦) are you considering, or how many guests are you expecting? I can calculate exact Naira allocations for you!`;
+  // Investing queries
+  if (q.includes('invest') || q.includes('investment') || q.includes('stock') || q.includes('crypto')) {
+    return `Here are the top low-risk investment options in Nigeria:
+
+• Money Market Funds (MMF): 15% - 20% annual yield, high liquidity
+• Treasury Bills (T-Bills): Government backed, fixed tenure
+• High-Yield Savings Accounts: Automated daily/monthly interest
+• Agriculture/Commercial Paper: For vetted short-term returns
+
+Would you like recommendations based on a specific investment timeline?`;
   }
 
   // Budgeting & Savings Rules
   if (q.includes('budget') || q.includes('save') || q.includes('saving') || q.includes('salary') || q.includes('income')) {
-    return `Here is a proven financial framework to budget and grow your savings effectively:
+    return `Here is your personal savings framework:
 
-1. The 50/30/20 Budgeting Rule
-Allocate 50% of your monthly income to Needs (Rent, groceries, utilities, transportation), 30% to Wants (Leisure, dining out, subscriptions), and 20% directly to Savings and Investments.
+• Needs (50%): Rent, groceries, transport, utilities
+• Wants (30%): Subscriptions, dining, personal items
+• Savings (20%): Emergency fund & wealth building
 
-2. Emergency Fund Setup
-Build a safety net of 3 to 6 months of living expenses in an accessible high-yield savings account or money market fund.
-
-3. Debt and Expense Trimming
-Review recurrent bank transfers and subscriptions. Identify areas where transport and food costs can be streamlined.
-
-Would you like to share your monthly income or upload your bank statement PDF so I can create a customized savings breakdown for you?`;
+Would you like to share your monthly income to see exact Naira allocations?`;
   }
 
   // Bank Statement / Expense Queries
   if (matchContext || summaryContext) {
-    return `Based on your bank records:
+    return `Here is your statement summary:
 
-${summaryContext ? summaryContext + '\n\n' : ''}${matchContext ? matchContext + '\n\n' : ''}You can ask me specific questions about your spending in any category, or ask for strategies to lower your monthly expenses.`;
+${summaryContext ? summaryContext + '\n\n' : ''}${matchContext ? matchContext + '\n\n' : ''}Would you like me to show specific transactions or ways to reduce spending?`;
   }
 
   // General Financial Advice
-  return `Thank you for your question. As your AI financial advisor, I help you build budgets, analyze bank statements, optimize savings, and manage expenses.
+  return `Here is how I can assist your finances:
 
-To give you the most accurate financial guidance:
-1. You can upload your text-based bank statement PDF right here in the chat for full income and expense analysis.
-2. Or let me know your specific target amount in Nigerian Naira (₦) and timeframe so I can prepare a custom budget plan for you.`;
+• Bank Statement Analysis: Extract income, outflow, and savings rate
+• Budget Planning: 50/30/20 monthly budget creation
+• Expense Tracking: Identify top spending categories
+• Investment Guidance: Low-risk wealth accumulation strategies
+
+Would you like to upload a bank statement PDF or create a custom budget?`;
 }

@@ -329,9 +329,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                     {msg.text ? (
                                         <div className="whitespace-pre-wrap break-words">{msg.text}</div>
                                     ) : (
-                                        <div className="flex items-center gap-2 text-gray-400 py-1">
-                                            <Loader2 className="w-4 h-4 animate-spin text-[#63a2cf]" />
-                                            <span className="text-xs">Claude is thinking...</span>
+                                        <div className="flex items-center gap-1.5 py-1.5 px-1">
+                                            <div className="w-2 h-2 bg-[#63a2cf] rounded-full animate-bounce [animation-delay:-0.3s]" />
+                                            <div className="w-2 h-2 bg-[#63a2cf] rounded-full animate-bounce [animation-delay:-0.15s]" />
+                                            <div className="w-2 h-2 bg-[#63a2cf] rounded-full animate-bounce" />
                                         </div>
                                     )}
                                     {msg.fileName && (
@@ -344,11 +345,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             </div>
                         ))}
 
-                        {/* Animated Loading Status */}
-                        {isLoading && loadingStatus && (
-                            <div className="flex items-center gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-100 px-3 py-2 rounded-xl w-fit mx-auto animate-pulse">
-                                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#63a2cf]" />
-                                <span>{loadingStatus}</span>
+                        {/* Animated 3 Preloading Dots Status */}
+                        {isLoading && (
+                            <div className="flex items-center gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-100 px-3.5 py-2 rounded-2xl w-fit mr-auto shadow-sm">
+                                <div className="flex items-center gap-1.5 py-0.5">
+                                    <div className="w-1.5 h-1.5 bg-[#63a2cf] rounded-full animate-bounce [animation-delay:-0.3s]" />
+                                    <div className="w-1.5 h-1.5 bg-[#63a2cf] rounded-full animate-bounce [animation-delay:-0.15s]" />
+                                    <div className="w-1.5 h-1.5 bg-[#63a2cf] rounded-full animate-bounce" />
+                                </div>
+                                <span className="font-medium text-gray-500">Finance AI is typing...</span>
                             </div>
                         )}
 
