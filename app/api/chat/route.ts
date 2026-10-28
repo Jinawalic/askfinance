@@ -39,29 +39,46 @@ export async function POST(req: NextRequest) {
 
         let sessionId = inputSessionId;
 
-        // Ensure session exists in Postgres & link to userId
+        // Verify userId in database if provided to prevent foreign key violations
+        let validUserId: string | null = null;
+        if (userId && typeof userId === 'string' && userId.trim() && userId !== 'undefined' && userId !== 'null') {
+            try {
+                const user = await prisma.user.findUnique({
+                    where: { id: userId.trim() },
+                    select: { id: true }
+                });
+                if (user) {
+                    validUserId = user.id;
+                }
+            } catch (uErr) {
+                console.warn('Warning: Failed to verify userId in chat route:', uErr);
+            }
+        }
+
+        // Ensure session exists in Postgres & link to valid userId
         if (!sessionId) {
             const newSession = await prisma.chatSession.create({
                 data: {
                     title: message.substring(0, 35) || 'Financial Chat',
-                    userId: userId || undefined,
+                    userId: validUserId || undefined,
                 }
             });
             sessionId = newSession.id;
         } else {
             const existing = await prisma.chatSession.findUnique({ where: { id: sessionId } });
             if (!existing) {
-                await prisma.chatSession.create({
+                const newSession = await prisma.chatSession.create({
                     data: {
                         id: sessionId,
                         title: message.substring(0, 35) || 'Financial Chat',
-                        userId: userId || undefined,
+                        userId: validUserId || undefined,
                     }
                 });
-            } else if (userId && !existing.userId) {
+                sessionId = newSession.id;
+            } else if (validUserId && !existing.userId) {
                 await prisma.chatSession.update({
                     where: { id: sessionId },
-                    data: { userId: userId }
+                    data: { userId: validUserId }
                 });
             }
         }
@@ -215,12 +232,7 @@ ${ragContext ? `### Relevant Line Items from User's Bank Statement (Vector RAG):
             }
         });
 
-        // Return native Vercel AI SDK response helper with x-session-id header
-        const toResponse = (result as any).toDataStreamResponse
-            ? (result as any).toDataStreamResponse.bind(result)
-            : result.toTextStreamResponse.bind(result);
-
-        return toResponse({
+        return result.toTextStreamResponse({
             headers: {
                 'x-session-id': sessionId ?? '',
                 'Access-Control-Expose-Headers': 'x-session-id',

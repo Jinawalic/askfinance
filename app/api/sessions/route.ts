@@ -17,8 +17,19 @@ export async function GET(req: NextRequest) {
         const { searchParams } = new URL(req.url);
         const userId = searchParams.get('userId');
 
+        let userValid = true;
+        if (userId && typeof userId === 'string' && userId.trim() && userId !== 'undefined' && userId !== 'null') {
+            const user = await prisma.user.findUnique({
+                where: { id: userId.trim() },
+                select: { id: true }
+            });
+            if (!user) {
+                userValid = false;
+            }
+        }
+
         const sessions = await prisma.chatSession.findMany({
-            where: userId ? { OR: [{ userId }, { userId: null }] } : {},
+            where: (userId && userValid) ? { OR: [{ userId }, { userId: null }] } : {},
             orderBy: { updatedAt: 'desc' },
             include: {
                 messages: {
@@ -48,7 +59,7 @@ export async function GET(req: NextRequest) {
             } : undefined
         }));
 
-        return NextResponse.json({ success: true, sessions: formatted });
+        return NextResponse.json({ success: true, sessions: formatted, userValid });
     } catch (error) {
         console.error('Error fetching sessions:', error);
         return NextResponse.json({ error: 'Failed to fetch sessions' }, { status: 500 });

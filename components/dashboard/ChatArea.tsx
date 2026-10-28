@@ -104,10 +104,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     method: 'POST',
                     body: formData,
                 });
-                const uploadData = await uploadRes.json();
+                let uploadData: any = {};
+                try {
+                    uploadData = await uploadRes.json();
+                } catch {
+                    uploadData = { error: 'Invalid response from server' };
+                }
 
                 if (!uploadRes.ok) {
-                    throw new Error(uploadData.error || 'Failed to upload bank statement');
+                    const message = uploadData.details 
+                        ? `${uploadData.error || 'Upload failed'} (${uploadData.details})`
+                        : (uploadData.error || 'Failed to upload bank statement');
+                    throw new Error(message);
                 }
 
                 activeSessionId = uploadData.sessionId;
@@ -128,7 +136,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
             } catch (err: unknown) {
                 const errorMessage = err instanceof Error ? err.message : 'Upload failed';
-                alert(errorMessage);
+                console.error('[Upload Error]:', err);
+                const errMessage: Message = {
+                    id: Date.now().toString(),
+                    text: `⚠️ Statement Processing Error: ${errorMessage}`,
+                    sender: 'ai',
+                };
+                setMessages((prev) => [...prev, errMessage]);
                 setIsLoading(false);
                 setLoadingStatus('');
                 return;

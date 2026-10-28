@@ -22,66 +22,125 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: 'Only PDF files are supported.' }, { status: 400 });
         }
 
-        // Ensure session exists in Postgres & link to userId
+        // 1. Verify userId in database if provided to prevent foreign key constraint violations
+        let validUserId: string | null = null;
+        if (userId && typeof userId === 'string' && userId.trim() && userId !== 'undefined' && userId !== 'null') {
+            try {
+                const user = await prisma.user.findUnique({
+                    where: { id: userId.trim() },
+                    select: { id: true }
+                });
+                if (user) {
+                    validUserId = user.id;
+                }
+            } catch (userErr) {
+                console.warn('Warning: Failed to verify userId in database:', userErr);
+            }
+        }
+
+        // 2. Ensure session exists in Postgres & link to valid userId
         if (!sessionId || sessionId === 'default-session') {
             const newSession = await prisma.chatSession.create({
                 data: {
                     title: `Statement: ${file.name}`,
-                    userId: userId || undefined,
+                    userId: validUserId || undefined,
                 }
             });
             sessionId = newSession.id;
         } else {
             const existing = await prisma.chatSession.findUnique({ where: { id: sessionId } });
             if (!existing) {
-                await prisma.chatSession.create({
+                const newSession = await prisma.chatSession.create({
                     data: {
                         id: sessionId,
                         title: `Statement: ${file.name}`,
-                        userId: userId || undefined,
+                        userId: validUserId || undefined,
                     }
                 });
-            } else if (userId && !existing.userId) {
+                sessionId = newSession.id;
+            } else if (validUserId && !existing.userId) {
                 await prisma.chatSession.update({
                     where: { id: sessionId },
-                    data: { userId: userId }
+                    data: { userId: validUserId }
                 });
             }
         }
 
-        // Parse PDF using unpdf (pure JS — serverless/Vercel safe)
+        // 3. Parse PDF text using unpdf
         const arrayBuffer = await file.arrayBuffer();
-        const { text: rawText } = await extractText(new Uint8Array(arrayBuffer), { mergePages: true });
+        let rawText = '';
+        try {
+            const parsed = await extractText(new Uint8Array(arrayBuffer), { mergePages: true });
+            rawText = parsed?.text ?? '';
+        } catch (pdfErr) {
+            console.error('Error extracting text from PDF:', pdfErr);
+            return NextResponse.json({
+                error: 'Could not parse the PDF file. Please ensure it is a valid, unencrypted text-based bank statement.',
+                details: pdfErr instanceof Error ? pdfErr.message : String(pdfErr)
+            }, { status: 422 });
+        }
 
+        // Clean lines & strip null bytes or binary noise
         const lines = (rawText ?? '')
             .split('\n')
-            .map((line: string) => line.trim())
-            .filter((line: string) => line.length > 5); // Filter noise lines
+            .map((line: string) => line.replace(/\0/g, '').trim())
+            .filter((line: string) => line.length > 5);
 
         if (lines.length === 0) {
-            return NextResponse.json({ error: 'Could not extract any text from the PDF. Please ensure it is a text-based (not scanned) bank statement.' }, { status: 422 });
+            return NextResponse.json({
+                error: 'Could not extract any text from the PDF. Please ensure it is a text-based (not scanned/image-only) bank statement.'
+            }, { status: 422 });
         }
 
+        // 4. Extract financial transactions from statement lines
         const detectedTransactions: Transaction[] = [];
+        const dateRegex = /\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
+        const amountRegex = /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/;
 
         for (const line of lines) {
-            const amountMatch = line.match(/(\d{1,3}(,\d{3})*(\.\d{2})?)/);
-            if (amountMatch) {
-                const amount = parseFloat(amountMatch[0].replace(/,/g, ''));
-                const isDebit = line.toLowerCase().includes('debit') || line.includes('-');
+            const amountMatch = line.match(amountRegex);
+            if (amountMatch && amountMatch[0].length >= 2) {
+                const cleanAmountStr = amountMatch[0].replace(/,/g, '');
+                const amount = parseFloat(cleanAmountStr);
+                
+                if (Number.isFinite(amount) && amount > 0) {
+                    const lower = line.toLowerCase();
+                    const isDebit = lower.includes('debit') || lower.includes('dr') || lower.includes('-') || lower.includes('withdrawal');
+                    const dateMatch = line.match(dateRegex);
+                    const txDate = dateMatch ? dateMatch[0] : new Date().toISOString().split('T')[0];
 
-                detectedTransactions.push({
-                    date: new Date().toISOString().split('T')[0],
-                    description: line.substring(0, 50).trim(),
-                    amount: amount,
-                    type: isDebit ? 'debit' : 'credit'
-                });
+                    detectedTransactions.push({
+                        date: txDate,
+                        description: line.substring(0, 60).trim(),
+                        amount: amount,
+                        type: isDebit ? 'debit' : 'credit'
+                    });
+                }
             }
         }
 
-        // Generate vector embeddings in batch via Voyage AI (chunks of max 50 lines)
-        const batchSize = 50;
-        for (let i = 0; i < lines.length; i += batchSize) {
+        // 5. Store detected transactions in database for keyword querying in chat
+        if (detectedTransactions.length > 0) {
+            try {
+                await prisma.transaction.createMany({
+                    data: detectedTransactions.slice(0, 100).map((tx) => ({
+                        sessionId: sessionId,
+                        date: tx.date,
+                        description: tx.description,
+                        amount: tx.amount,
+                        type: tx.type === 'debit' ? 'DEBIT' : 'CREDIT',
+                    }))
+                });
+            } catch (txDbErr) {
+                console.warn('Notice: Could not insert transactions table records:', txDbErr);
+            }
+        }
+
+        // 6. Generate vector embeddings in batch via Voyage AI (chunks of max 30 lines)
+        const batchSize = 30;
+        const totalLinesToProcess = Math.min(lines.length, 150); // Cap at 150 top lines for fast RAG ingestion
+
+        for (let i = 0; i < totalLinesToProcess; i += batchSize) {
             const chunkLines = lines.slice(i, i + batchSize);
             try {
                 const embeddings = await generateBatchEmbeddings(chunkLines, 'document');
@@ -108,10 +167,10 @@ export async function POST(req: NextRequest) {
             }
         }
 
-        // Calculate financial statistics using financial rules engine
+        // 7. Calculate financial statistics using financial rules engine
         const financialSummary = analyzeTransactions(detectedTransactions);
 
-        // Upsert summary to Postgres
+        // 8. Upsert summary to Postgres safely
         await prisma.financialSummary.upsert({
             where: { sessionId: sessionId },
             update: {
@@ -131,7 +190,7 @@ export async function POST(req: NextRequest) {
             }
         });
 
-        // Record document upload message in session history
+        // 9. Record document upload message in session history
         await prisma.message.create({
             data: {
                 sessionId: sessionId,

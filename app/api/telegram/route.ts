@@ -20,7 +20,7 @@ function getBotApi(): string {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Send native Telegram typing indicator (preloading animated 3 dots) */
+/** Send native Telegram typing indicator (animated 3 dots) */
 async function sendTyping(chatId: number | string) {
   try {
     await axios.post(`${getBotApi()}/sendChatAction`, {
@@ -52,50 +52,75 @@ function formatCleanText(text: string): string {
     .trim();
 }
 
-/** Send a clean text reply back to a Telegram chat. */
+/** Send a clean text reply back to a Telegram chat, automatically splitting long messages. */
 async function sendMessage(chatId: number | string, text: string) {
   const clean = formatCleanText(text) || text || "I'm here to help with your finances!";
-  try {
-    await axios.post(`${getBotApi()}/sendMessage`, {
-      chat_id: chatId,
-      text: clean,
-    });
-  } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[Telegram sendMessage Error for chatId=${chatId}]:`, errorMsg);
+  
+  // Telegram has a max message length limit of 4096 characters
+  const MAX_CHUNK = 4000;
+  const chunks: string[] = [];
+  if (clean.length > MAX_CHUNK) {
+    for (let i = 0; i < clean.length; i += MAX_CHUNK) {
+      chunks.push(clean.substring(i, i + MAX_CHUNK));
+    }
+  } else {
+    chunks.push(clean);
+  }
+
+  for (const chunk of chunks) {
+    try {
+      await axios.post(`${getBotApi()}/sendMessage`, {
+        chat_id: chatId,
+        text: chunk,
+      });
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Telegram sendMessage Error for chatId=${chatId}]:`, errorMsg);
+    }
   }
 }
 
-// ─── Webhook Entry Point ───────────────────────────────────────────────────────
+// ─── Webhook Entry Points ──────────────────────────────────────────────────────
 
+// GET: Healthcheck for webhook verification
+export async function GET() {
+  return NextResponse.json({
+    status: 'ok',
+    service: 'Finance AI Telegram Webhook',
+    timestamp: new Date().toISOString(),
+  });
+}
+
+// POST: Main Telegram update receiver
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const message = body.message;
+    const message = body.message || body.edited_message;
 
-    // Ignore non-message updates (e.g. edited_message, channel_post, etc.)
+    // Ignore non-message updates (e.g. channel_post, my_chat_member, etc.)
     if (!message) return NextResponse.json({ ok: true });
 
     const chatId: number = message.chat.id;
     const text: string | undefined = message.text;
     const document = message.document;
+    const from = message.from;
 
-    // Send typing indicator (3 preloading dots) immediately
+    // Send typing indicator immediately
     sendTyping(chatId);
 
-    // ── 1. /start command — link chatId to the registered web username ──────
+    // ── 1. /start command ───────────────────────────────────────────────────
     if (text && text.startsWith('/start')) {
-      return await handleStart(chatId, text);
+      return await handleStart(chatId, text, from);
     }
 
     // ── 2. Document upload (Bank Statement PDF) ────────────────────────────
     if (document) {
-      return await handleDocument(chatId, document);
+      return await handleDocument(chatId, document, from);
     }
 
     // ── 3. Regular text message (Financial advisory query) ─────────────────
     if (text) {
-      return await handleTextMessage(chatId, text);
+      return await handleTextMessage(chatId, text, from);
     }
 
     return NextResponse.json({ ok: true });
@@ -107,82 +132,186 @@ export async function POST(req: NextRequest) {
 
 // ─── /start Handler ───────────────────────────────────────────────────────────
 
-async function handleStart(chatId: number, text: string) {
-  // Telegram delivers the deep-link payload as "/start <payload>"
+async function handleStart(chatId: number, text: string, from?: any) {
+  const chatIdStr = String(chatId);
   const parts = text.split(' ');
   const payload = parts[1]?.trim().toLowerCase();
 
-  // If payload (username) provided in the start link:
+  // If payload (username) provided in the start link (e.g., /start john):
   if (payload) {
-    // Look up the user by their web-registered username
-    let user = await prisma.user.findUnique({
-      where: { username: payload },
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { username: { equals: payload, mode: 'insensitive' } },
+          { name: { equals: payload, mode: 'insensitive' } },
+        ]
+      },
     });
 
-    // If user not registered yet, auto-create the account with this username
+    // Unbind this chatId from any other user to prevent unique constraint violation
+    await prisma.user.updateMany({
+      where: { telegramChatId: chatIdStr, NOT: user ? { id: user.id } : undefined },
+      data: { telegramChatId: null },
+    });
+
     if (!user) {
+      // Auto-create account with requested payload
       user = await prisma.user.create({
         data: {
           username: payload,
-          name: payload,
-          telegramChatId: String(chatId),
+          name: from?.first_name || payload,
+          telegramChatId: chatIdStr,
         },
       });
     } else {
-      // Link this Telegram chatId to the user record
-      await prisma.user.update({
+      // Link to existing user record
+      user = await prisma.user.update({
         where: { id: user.id },
-        data: { telegramChatId: String(chatId) },
+        data: { telegramChatId: chatIdStr },
       });
     }
 
     await sendMessage(
       chatId,
-      `Welcome to Finance AI, ${user.username}! 🎉\n\nYour Telegram account is now connected.\n\nYou can now:\n1. Ask any financial questions, budgeting advice, or expense queries.\n2. Send your bank statement (PDF) directly here to analyze your income, expenses, and savings.\n\nAll your data is secure and linked to your profile.`
+      `Welcome to Finance AI, ${user.username}! 🎉\n\nYour Telegram account is now connected.\n\nYou can now:\n• Ask any financial questions, budgeting advice, or expense queries.\n• Send your bank statement (PDF) directly here to analyze income, expenses, and savings.\n\nAll your data is secure and linked to your profile.`
     );
     return NextResponse.json({ ok: true });
   }
 
   // If no payload provided, check if this chatId is already linked
-  const existingUser = await prisma.user.findUnique({
-    where: { telegramChatId: String(chatId) },
+  let existingUser = await prisma.user.findUnique({
+    where: { telegramChatId: chatIdStr },
   });
 
-  if (existingUser) {
-    await sendMessage(
-      chatId,
-      `Welcome back, ${existingUser.username}! 👋\n\nI am your AI financial advisor. How can I assist you with your finances today? You can ask any question or upload a bank statement PDF.`
-    );
-    return NextResponse.json({ ok: true });
+  // If not linked by chatId, try finding by Telegram username
+  if (!existingUser && from?.username) {
+    const tgUsername = from.username.trim().toLowerCase();
+    const matched = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { username: { equals: tgUsername, mode: 'insensitive' } },
+          { name: { equals: tgUsername, mode: 'insensitive' } },
+        ]
+      }
+    });
+
+    if (matched) {
+      await prisma.user.updateMany({
+        where: { telegramChatId: chatIdStr, NOT: { id: matched.id } },
+        data: { telegramChatId: null },
+      });
+      existingUser = await prisma.user.update({
+        where: { id: matched.id },
+        data: { telegramChatId: chatIdStr },
+      });
+    }
   }
 
-  // If not linked and no username passed:
+  // If still not linked, seamlessly create user so they can immediately chat
+  if (!existingUser) {
+    const fallbackUsername = (from?.username || from?.first_name || `user_${chatId}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .slice(0, 32);
+
+    try {
+      await prisma.user.updateMany({
+        where: { telegramChatId: chatIdStr },
+        data: { telegramChatId: null },
+      });
+
+      existingUser = await prisma.user.upsert({
+        where: { username: fallbackUsername },
+        update: { telegramChatId: chatIdStr },
+        create: {
+          username: fallbackUsername,
+          name: from?.first_name || fallbackUsername,
+          telegramChatId: chatIdStr,
+        }
+      });
+    } catch (e) {
+      console.warn('Auto-create user notice in handleStart:', e);
+    }
+  }
+
+  const displayName = existingUser?.username || from?.first_name || 'there';
   await sendMessage(
     chatId,
-    'Welcome to Finance AI! 👋\n\nPlease visit the web app, enter your username, and click "Continue to Telegram" to link your account.\n\nAlternatively, send /start <your_username> here to connect.'
+    `Welcome to Finance AI, ${displayName}! 👋\n\nI am your AI financial advisor. How can I assist you with your finances today?\n\n• Ask budgeting questions (e.g., "How can I budget with ₦100k?")\n• Get investment advice for Nigeria\n• Upload a bank statement PDF for instant income & expense analysis`
   );
   return NextResponse.json({ ok: true });
 }
 
 // ─── Text Message Handler ──────────────────────────────────────────────────────
 
-async function handleTextMessage(chatId: number, text: string) {
+async function handleTextMessage(chatId: number, text: string, from?: any) {
   const chatIdStr = String(chatId);
 
-  // Look up the user by their linked Telegram chatId
+  // 1. Look up user by linked Telegram chatId
   let user = await prisma.user.findUnique({
     where: { telegramChatId: chatIdStr },
   });
 
+  // 2. If not found, try matching by Telegram username
+  if (!user && from?.username) {
+    const tgUsername = from.username.trim().toLowerCase();
+    const matched = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { username: { equals: tgUsername, mode: 'insensitive' } },
+          { name: { equals: tgUsername, mode: 'insensitive' } },
+        ]
+      }
+    });
+
+    if (matched) {
+      await prisma.user.updateMany({
+        where: { telegramChatId: chatIdStr, NOT: { id: matched.id } },
+        data: { telegramChatId: null },
+      });
+      user = await prisma.user.update({
+        where: { id: matched.id },
+        data: { telegramChatId: chatIdStr },
+      });
+    }
+  }
+
+  // 3. If still not found, auto-create account seamlessly so the user ALWAYS gets a reply
+  if (!user) {
+    const fallbackUsername = (from?.username || from?.first_name || `user_${chatId}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .slice(0, 32);
+
+    try {
+      await prisma.user.updateMany({
+        where: { telegramChatId: chatIdStr },
+        data: { telegramChatId: null },
+      });
+
+      user = await prisma.user.upsert({
+        where: { username: fallbackUsername },
+        update: { telegramChatId: chatIdStr },
+        create: {
+          username: fallbackUsername,
+          name: from?.first_name || fallbackUsername,
+          telegramChatId: chatIdStr,
+        }
+      });
+    } catch (e) {
+      console.warn('Auto-create user notice in handleTextMessage:', e);
+    }
+  }
+
   if (!user) {
     await sendMessage(
       chatId,
-      'Your Telegram account is not linked yet.\n\nPlease visit our web app, enter your username, and click Continue to Telegram, or send /start <your_username>.'
+      'Welcome to Finance AI! 👋\n\nPlease send /start to connect your account.'
     );
     return NextResponse.json({ ok: true });
   }
 
-  // ── Persist the user's incoming message ─────────────────────────────────
+  // 4. Persist incoming user message
   await prisma.telegramMessage.create({
     data: {
       userId: user.id,
@@ -191,10 +320,10 @@ async function handleTextMessage(chatId: number, text: string) {
     },
   });
 
-  // ── Generate AI response with full financial context & RAG ──────────────
+  // 5. Generate AI response with full financial context, RAG & Claude
   const botReply = await generateBotResponse(user.id, text);
 
-  // ── Persist the bot's reply ──────────────────────────────────────────────
+  // 6. Persist bot reply
   await prisma.telegramMessage.create({
     data: {
       userId: user.id,
@@ -203,26 +332,36 @@ async function handleTextMessage(chatId: number, text: string) {
     },
   });
 
+  // 7. Send message back to user on Telegram
   await sendMessage(chatId, botReply);
   return NextResponse.json({ ok: true });
 }
 
 // ─── Document Handler (PDF Bank Statements) ───────────────────────────────────
 
-async function handleDocument(chatId: number, document: { file_id: string; file_name?: string }) {
+async function handleDocument(chatId: number, document: { file_id: string; file_name?: string }, from?: any) {
   const chatIdStr = String(chatId);
 
-  // Verify the user is linked before accepting uploads
-  const user = await prisma.user.findUnique({
+  // Verify or auto-link user
+  let user = await prisma.user.findUnique({
     where: { telegramChatId: chatIdStr },
   });
 
   if (!user) {
-    await sendMessage(
-      chatId,
-      'Please link your account first by registering on the web app or typing /start <your_username>.'
-    );
-    return NextResponse.json({ ok: true });
+    const fallbackUsername = (from?.username || from?.first_name || `user_${chatId}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .slice(0, 32);
+
+    user = await prisma.user.upsert({
+      where: { username: fallbackUsername },
+      update: { telegramChatId: chatIdStr },
+      create: {
+        username: fallbackUsername,
+        name: from?.first_name || fallbackUsername,
+        telegramChatId: chatIdStr,
+      }
+    });
   }
 
   const fileName = document.file_name ?? 'Bank_Statement.pdf';
@@ -232,7 +371,7 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
     return NextResponse.json({ ok: true });
   }
 
-  await sendMessage(chatId, `Analyzing statement "${fileName}"... Please give me a few moment.`);
+  await sendMessage(chatId, `Analyzing statement "${fileName}"... Please give me a moment.`);
 
   try {
     // 1. Retrieve the downloadable file URL from Telegram Bot API
@@ -248,7 +387,7 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
     const { text: rawText } = await extractText(buffer, { mergePages: true });
     const lines = (rawText ?? '')
       .split('\n')
-      .map((line: string) => line.trim())
+      .map((line: string) => line.replace(/\0/g, '').trim())
       .filter((line: string) => line.length > 5);
 
     if (lines.length === 0) {
@@ -261,22 +400,30 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
 
     // 4. Detect transactions from the document
     const detectedTransactions: ParsedTransaction[] = [];
-    for (const line of lines) {
-      const amountMatch = line.match(/(\d{1,3}(,\d{3})*(\.\d{2})?)/);
-      if (amountMatch) {
-        const amount = parseFloat(amountMatch[0].replace(/,/g, ''));
-        const isDebit = line.toLowerCase().includes('debit') || line.includes('-');
+    const dateRegex = /\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
+    const amountRegex = /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/;
 
-        detectedTransactions.push({
-          date: new Date().toISOString().split('T')[0],
-          description: line.substring(0, 60).trim(),
-          amount: amount,
-          type: isDebit ? 'debit' : 'credit',
-        });
+    for (const line of lines) {
+      const amountMatch = line.match(amountRegex);
+      if (amountMatch && amountMatch[0].length >= 2) {
+        const amount = parseFloat(amountMatch[0].replace(/,/g, ''));
+        if (Number.isFinite(amount) && amount > 0) {
+          const lower = line.toLowerCase();
+          const isDebit = lower.includes('debit') || lower.includes('dr') || lower.includes('-') || lower.includes('withdrawal');
+          const dateMatch = line.match(dateRegex);
+          const txDate = dateMatch ? dateMatch[0] : new Date().toISOString().split('T')[0];
+
+          detectedTransactions.push({
+            date: txDate,
+            description: line.substring(0, 60).trim(),
+            amount: amount,
+            type: isDebit ? 'debit' : 'credit',
+          });
+        }
       }
     }
 
-    // 5. Create or get user's session for this statement
+    // 5. Create user session for this statement
     const session = await prisma.chatSession.create({
       data: {
         title: `Telegram: ${fileName}`,
@@ -286,20 +433,25 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
 
     // 6. Save detected transactions to database
     if (detectedTransactions.length > 0) {
-      await prisma.transaction.createMany({
-        data: detectedTransactions.slice(0, 100).map((t) => ({
-          sessionId: session.id,
-          date: t.date,
-          description: t.description,
-          amount: t.amount,
-          type: t.type === 'debit' ? 'DEBIT' : 'CREDIT',
-        })),
-      });
+      try {
+        await prisma.transaction.createMany({
+          data: detectedTransactions.slice(0, 100).map((t) => ({
+            sessionId: session.id,
+            date: t.date,
+            description: t.description,
+            amount: t.amount,
+            type: t.type === 'debit' ? 'DEBIT' : 'CREDIT',
+          })),
+        });
+      } catch (txErr) {
+        console.warn('[Telegram Document Transactions Save Notice]:', txErr);
+      }
     }
 
     // 7. Generate vector embeddings in batch via Voyage AI
-    const batchSize = 50;
-    for (let i = 0; i < lines.length; i += batchSize) {
+    const batchSize = 30;
+    const totalLinesToProcess = Math.min(lines.length, 120);
+    for (let i = 0; i < totalLinesToProcess; i += batchSize) {
       const chunkLines = lines.slice(i, i + batchSize);
       try {
         const embeddings = await generateBatchEmbeddings(chunkLines, 'document');
@@ -324,7 +476,7 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
       }
     }
 
-    // 8. Calculate financial summary
+    // 8. Calculate financial summary safely
     const summary = analyzeTransactions(detectedTransactions);
 
     // Save summary to database
@@ -339,20 +491,20 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
       },
     });
 
-    // 9. Send detailed summary message back to user on Telegram
+    // 9. Send structured summary message back to user on Telegram
     const summaryMessage = `Statement analysis complete for "${fileName}"! 📊
 
-Total Inflow: ₦${summary.totalInflow.toLocaleString()}
-Total Outflow: ₦${summary.totalOutflow.toLocaleString()}
-Net Savings: ₦${summary.netSavings.toLocaleString()}
-Savings Rate: ${summary.savingsRatePercent}%
+• Total Inflow: ₦${summary.totalInflow.toLocaleString()}
+• Total Outflow: ₦${summary.totalOutflow.toLocaleString()}
+• Net Savings: ₦${summary.netSavings.toLocaleString()}
+• Savings Rate: ${summary.savingsRatePercent}%
 
 Expense Breakdown:
-Transport: ₦${(summary.categories['Transport'] || 0).toLocaleString()}
-Food: ₦${(summary.categories['Food'] || 0).toLocaleString()}
-Utilities: ₦${(summary.categories['Utilities'] || 0).toLocaleString()}
-Shopping: ₦${(summary.categories['Shopping'] || 0).toLocaleString()}
-Other: ₦${(summary.categories['Uncategorized'] || 0).toLocaleString()}
+• Transport: ₦${(summary.categories['Transport'] || 0).toLocaleString()}
+• Food: ₦${(summary.categories['Food'] || 0).toLocaleString()}
+• Utilities: ₦${(summary.categories['Utilities'] || 0).toLocaleString()}
+• Shopping: ₦${(summary.categories['Shopping'] || 0).toLocaleString()}
+• Other: ₦${(summary.categories['Uncategorized'] || 0).toLocaleString()}
 
 You can now ask me any questions about your transactions, spending habits, or how to optimize your savings!`;
 
@@ -479,7 +631,7 @@ Expense Categories: ${JSON.stringify(summary.categories)}`;
     messages.shift();
   }
 
-  // Add the current user query
+  // Add current user query
   if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
     messages[messages.length - 1].content = userQuery;
   } else {
@@ -510,7 +662,8 @@ ${ragContext ? `### Statement Context:\n${ragContext}\n` : ''}`;
 
   if (process.env.ANTHROPIC_API_KEY) {
     try {
-      const Anthropic = (await import('@anthropic-ai/sdk')).default;
+      const AnthropicModule = await import('@anthropic-ai/sdk');
+      const Anthropic = AnthropicModule.default || AnthropicModule.Anthropic;
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY.trim() });
 
       for (const model of MODELS) {
@@ -563,7 +716,7 @@ ${ragContext ? `### Statement Context:\n${ragContext}\n` : ''}`;
     }
   }
 
-  // D. Intelligent Financial Advisory Fallback Engine (Concise & Structured like inspiration)
+  // Intelligent Financial Advisory Fallback Engine
   return generateFinancialFallback(userQuery, exactMatchContext, summaryContext);
 }
 
@@ -584,7 +737,7 @@ function generateFinancialFallback(query: string, matchContext: string, summaryC
 What total budget amount in ₦ are you targeting for the event?`;
   }
 
-  // 80,000 or specific number budget
+  // Number budget matching (e.g. 50k, 80000, 100,000)
   const numberMatch = query.match(/(\d[\d,]*)/);
   if (numberMatch && (q.includes('budget') || q.includes('invest') || q.includes('save') || q.includes('spend'))) {
     const rawNum = parseFloat(numberMatch[1].replace(/,/g, ''));

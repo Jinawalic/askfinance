@@ -63,12 +63,20 @@ export function analyzeTransactions(transactions: Transaction[]) {
         }
     });
 
-    const netSavings = totalInflow - totalOutflow;
-    const savingsRatePercent = totalInflow > 0 ? Math.round((netSavings / totalInflow) * 100) : 0;
+    const safeInflow = Number.isFinite(totalInflow) ? Math.round(totalInflow * 100) / 100 : 0;
+    const safeOutflow = Number.isFinite(totalOutflow) ? Math.round(totalOutflow * 100) / 100 : 0;
+    const netSavings = Math.round((safeInflow - safeOutflow) * 100) / 100;
+    
+    let savingsRatePercent = 0;
+    if (safeInflow > 0 && Number.isFinite(netSavings)) {
+        const rawRate = Math.round((netSavings / safeInflow) * 100);
+        // Clamp to safe PostgreSQL integer limits (-100% to 100%)
+        savingsRatePercent = Math.max(-100, Math.min(100, rawRate));
+    }
 
     return {
-        totalInflow,
-        totalOutflow,
+        totalInflow: safeInflow,
+        totalOutflow: safeOutflow,
         netSavings,
         savingsRatePercent,
         categories

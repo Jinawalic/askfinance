@@ -122,13 +122,17 @@ async function pollLoop() {
       if (res && res.ok && Array.isArray(res.result)) {
         for (const update of res.result) {
           offset = update.update_id + 1;
-          const sender = update.message?.from?.username || update.message?.from?.first_name || 'User';
-          const text = update.message?.text || (update.message?.document ? `[PDF: ${update.message.document.file_name}]` : '[Update]');
-          console.log(`📩 Received from @${sender}: "${text}"`);
+          const msg = update.message || update.edited_message;
+          if (!msg) continue;
+          const sender = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || 'User');
+          const text = msg.text || (msg.document ? `[PDF: ${msg.document.file_name || 'Document'}]` : '[Message]');
+          console.log(`📩 Received from ${sender}: "${text}"`);
 
           const result = await forwardToLocalApp(update);
           if (result.status === 200) {
             console.log(`⚡ Bot replied successfully.`);
+          } else {
+            console.warn(`⚠️ Local server responded with status: ${result.status} ${result.body || ''}`);
           }
         }
       }

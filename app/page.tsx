@@ -21,15 +21,28 @@ export default function Home() {
     try {
       const res = await fetch(`/api/sessions?userId=${uid}`);
       const data = await res.json();
-      if (res.ok && data.sessions) {
-        setSessions(data.sessions);
-        // Automatically select the most recent active chat if available
-        if (data.sessions.length > 0) {
-          setActiveChatId(data.sessions[0].id);
-          setCurrentView('history');
-        } else {
+      if (res.ok) {
+        if (data.userValid === false) {
+          console.warn('Cached user is no longer valid in database. Clearing stale session.');
+          localStorage.removeItem('fa_user_name');
+          localStorage.removeItem('fa_user_id');
+          setUserName('');
+          setUserId('');
+          setSessions([]);
           setActiveChatId(null);
-          setCurrentView('new-chat');
+          return;
+        }
+
+        if (data.sessions) {
+          setSessions(data.sessions);
+          // Automatically select the most recent active chat if available
+          if (data.sessions.length > 0) {
+            setActiveChatId(data.sessions[0].id);
+            setCurrentView('history');
+          } else {
+            setActiveChatId(null);
+            setCurrentView('new-chat');
+          }
         }
       }
     } catch (e) {
