@@ -6,7 +6,11 @@ import axios from 'axios';
 import { extractText } from 'unpdf';
 import { prisma } from '@/lib/db';
 import { generateEmbedding, generateBatchEmbeddings } from '@/utils/embeddings';
-import { analyzeTransactions, Transaction as ParsedTransaction } from '@/utils/financialRules';
+import {
+  parseBankStatementText,
+  computeStatementSummary,
+} from '@/utils/statementParser';
+import { askFinancialQuestion } from '@/services/financialQAService';
 
 const DEFAULT_BOT_TOKEN = '8767722632:AAERn7tPHJOXgOXXiNRuT0Sf8GPsn4rwO90';
 
@@ -103,6 +107,7 @@ export async function POST(req: NextRequest) {
     const chatId: number = message.chat.id;
     const text: string | undefined = message.text;
     const document = message.document;
+    const caption: string | undefined = message.caption;
     const from = message.from;
 
     // Send typing indicator immediately
@@ -113,9 +118,9 @@ export async function POST(req: NextRequest) {
       return await handleStart(chatId, text, from);
     }
 
-    // ── 2. Document upload (Bank Statement PDF) ────────────────────────────
+    // ── 2. Document upload (Bank Statement PDF with optional caption) ────────
     if (document) {
-      return await handleDocument(chatId, document, from);
+      return await handleDocument(chatId, document, caption, from);
     }
 
     // ── 3. Regular text message (Financial advisory query) ─────────────────
@@ -324,13 +329,41 @@ async function handleTextMessage(chatId: number, text: string, from?: any) {
     console.warn('[Telegram User Message Save Notice]:', err);
   }
 
-  // 5. Generate AI response with full financial context, RAG & Claude
+  // Find user's latest statement session with transactions
+  const latestSession = await prisma.chatSession.findFirst({
+    where: { userId: user.id, transactions: { some: {} } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+
+  // Retrieve past message history
+  let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  try {
+    const past = await prisma.telegramMessage.findMany({
+      where: { userId: user.id },
+      orderBy: { createdAt: 'asc' },
+      take: 10,
+    });
+    history = past.slice(0, -1).map((m) => ({
+      role: (m.role === 'USER' ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: m.text,
+    }));
+  } catch (hErr) {
+    console.warn('[Telegram History Fetch Notice]:', hErr);
+  }
+
+  // 5. Generate AI response using Deterministic Tool Calling Engine
   let botReply = '';
   try {
-    botReply = await generateBotResponse(user.id, text);
+    botReply = await askFinancialQuestion({
+      userId: user.id,
+      statementId: latestSession?.id,
+      userQuery: text,
+      history,
+    });
   } catch (genErr) {
-    console.error('[Telegram generateBotResponse Error]:', genErr);
-    botReply = "I am having a brief moment processing that. How can I assist you with your finances today?";
+    console.error('[Telegram askFinancialQuestion Error]:', genErr);
+    botReply = "I am having a brief moment processing that. Please try asking your financial question again!";
   }
 
   // 6. Persist bot reply
@@ -353,7 +386,12 @@ async function handleTextMessage(chatId: number, text: string, from?: any) {
 
 // ─── Document Handler (PDF Bank Statements) ───────────────────────────────────
 
-async function handleDocument(chatId: number, document: { file_id: string; file_name?: string }, from?: any) {
+async function handleDocument(
+  chatId: number,
+  document: { file_id: string; file_name?: string },
+  caption?: string,
+  from?: any
+) {
   const chatIdStr = String(chatId);
 
   // Verify or auto-link user
@@ -374,7 +412,7 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
         username: fallbackUsername,
         name: from?.first_name || fallbackUsername,
         telegramChatId: chatIdStr,
-      }
+      },
     });
   }
 
@@ -399,12 +437,7 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
 
     // 3. Extract text using unpdf
     const { text: rawText } = await extractText(buffer, { mergePages: true });
-    const lines = (rawText ?? '')
-      .split('\n')
-      .map((line: string) => line.replace(/\0/g, '').trim())
-      .filter((line: string) => line.length > 5);
-
-    if (lines.length === 0) {
+    if (!rawText || rawText.trim().length === 0) {
       await sendMessage(
         chatId,
         'Could not extract text from the PDF. Please ensure it is a text-based digital bank statement, not a scanned image.'
@@ -412,29 +445,15 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
       return NextResponse.json({ ok: true });
     }
 
-    // 4. Detect transactions from the document
-    const detectedTransactions: ParsedTransaction[] = [];
-    const dateRegex = /\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
-    const amountRegex = /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/;
+    // 4. Parse transactions using high-precision parser
+    const detectedTransactions = parseBankStatementText(rawText);
 
-    for (const line of lines) {
-      const amountMatch = line.match(amountRegex);
-      if (amountMatch && amountMatch[0].length >= 2) {
-        const amount = parseFloat(amountMatch[0].replace(/,/g, ''));
-        if (Number.isFinite(amount) && amount > 0) {
-          const lower = line.toLowerCase();
-          const isDebit = lower.includes('debit') || lower.includes('dr') || lower.includes('-') || lower.includes('withdrawal');
-          const dateMatch = line.match(dateRegex);
-          const txDate = dateMatch ? dateMatch[0] : new Date().toISOString().split('T')[0];
-
-          detectedTransactions.push({
-            date: txDate,
-            description: line.substring(0, 60).trim(),
-            amount: amount,
-            type: isDebit ? 'debit' : 'credit',
-          });
-        }
-      }
+    if (detectedTransactions.length === 0) {
+      await sendMessage(
+        chatId,
+        'No transactions could be recognized in this PDF. Please ensure it is a supported bank statement (e.g. OPay, GTBank, Access).'
+      );
+      return NextResponse.json({ ok: true });
     }
 
     // 5. Create user session for this statement
@@ -445,32 +464,42 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
       },
     });
 
-    // 6. Save detected transactions to database
-    if (detectedTransactions.length > 0) {
-      try {
-        await prisma.transaction.createMany({
-          data: detectedTransactions.slice(0, 100).map((t) => ({
-            sessionId: session.id,
-            date: t.date,
-            description: t.description,
-            amount: t.amount,
-            type: t.type === 'debit' ? 'DEBIT' : 'CREDIT',
-          })),
-        });
-      } catch (txErr) {
-        console.warn('[Telegram Document Transactions Save Notice]:', txErr);
-      }
+    // 6. Save detected transactions to database with structured columns
+    try {
+      await prisma.transaction.createMany({
+        data: detectedTransactions.map((t) => ({
+          sessionId: session.id,
+          statementId: session.id,
+          userId: user.id,
+          transactionDate: t.transactionDate,
+          date: t.dateStr,
+          description: t.description,
+          amount: t.amount,
+          debit: t.debit,
+          credit: t.credit,
+          balanceAfter: t.balanceAfter,
+          type: t.type === 'debit' ? 'DEBIT' : 'CREDIT',
+          accountSection: t.accountSection,
+          category: t.category,
+          isInternalSweep: t.isInternalSweep,
+        })),
+      });
+    } catch (txErr) {
+      console.warn('[Telegram Document Transactions Save Notice]:', txErr);
     }
 
-    // 7. Generate vector embeddings in batch via Voyage AI
+    // 7. Generate vector embeddings in batch via Voyage AI (voyage-finance-2)
     const batchSize = 30;
-    const totalLinesToProcess = Math.min(lines.length, 120);
-    for (let i = 0; i < totalLinesToProcess; i += batchSize) {
-      const chunkLines = lines.slice(i, i + batchSize);
+    const sampleToEmbed = detectedTransactions.slice(0, 120);
+    const textChunks = sampleToEmbed.map(
+      (t) => `${t.dateStr}: ${t.description} — ₦${t.amount.toLocaleString()} (${t.type})`
+    );
+
+    for (let i = 0; i < textChunks.length; i += batchSize) {
+      const chunkTexts = textChunks.slice(i, i + batchSize);
       try {
-        const embeddings = await generateBatchEmbeddings(chunkLines, 'document');
-        for (let j = 0; j < chunkLines.length; j++) {
-          const lineText = chunkLines[j];
+        const embeddings = await generateBatchEmbeddings(chunkTexts, 'document');
+        for (let j = 0; j < chunkTexts.length; j++) {
           const vector = embeddings[j];
           if (vector && vector.length > 0) {
             const embeddingVectorString = `[${vector.join(',')}]`;
@@ -479,7 +508,7 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
               VALUES (
                 gen_random_uuid(), 
                 ${session.id}, 
-                ${lineText}, 
+                ${chunkTexts[j]}, 
                 ${embeddingVectorString}::vector
               );
             `;
@@ -490,37 +519,77 @@ async function handleDocument(chatId: number, document: { file_id: string; file_
       }
     }
 
-    // 8. Calculate financial summary safely
-    const summary = analyzeTransactions(detectedTransactions);
+    // 8. Calculate financial summary safely (internal sweeps excluded)
+    const summary = computeStatementSummary(detectedTransactions);
 
     // Save summary to database
-    await prisma.financialSummary.create({
-      data: {
-        sessionId: session.id,
-        totalInflow: summary.totalInflow,
-        totalOutflow: summary.totalOutflow,
-        netSavings: summary.netSavings,
-        savingsRatePercent: summary.savingsRatePercent,
-        categories: summary.categories,
-      },
-    });
+    try {
+      await prisma.financialSummary.create({
+        data: {
+          sessionId: session.id,
+          totalInflow: summary.totalInflow,
+          totalOutflow: summary.totalOutflow,
+          netSavings: summary.netSavings,
+          savingsRatePercent: summary.savingsRatePercent,
+          categories: summary.categories,
+        },
+      });
+    } catch (sumErr) {
+      console.warn('[FinancialSummary Save Notice]:', sumErr);
+    }
 
-    // 9. Send structured summary message back to user on Telegram
+    // 9. CHECK CAPTION: If caption is provided with a question, answer it immediately!
+    if (caption && caption.trim()) {
+      sendTyping(chatId);
+      let answer = '';
+      try {
+        answer = await askFinancialQuestion({
+          userId: user.id,
+          statementId: session.id,
+          userQuery: caption.trim(),
+        });
+      } catch (qaErr) {
+        console.error('[Claude QA Error on caption]:', qaErr);
+        answer = `I analyzed your statement "${fileName}". For your question ("${caption}"), please try asking once more.`;
+      }
+
+      // Persist in chat history
+      try {
+        await prisma.telegramMessage.create({
+          data: { userId: user.id, role: 'USER', text: `[Uploaded ${fileName}] ${caption.trim()}` },
+        });
+        await prisma.telegramMessage.create({
+          data: { userId: user.id, role: 'BOT', text: answer },
+        });
+      } catch (histErr) {
+        console.warn('[TelegramMessage History Notice]:', histErr);
+      }
+
+      await sendMessage(chatId, answer);
+      return NextResponse.json({ ok: true });
+    }
+
+    // 10. If caption is empty, send clean structured summary
     const summaryMessage = `Statement analysis complete for "${fileName}"! 📊
 
-• Total Inflow: ₦${summary.totalInflow.toLocaleString()}
-• Total Outflow: ₦${summary.totalOutflow.toLocaleString()}
-• Net Savings: ₦${summary.netSavings.toLocaleString()}
+• Total Inflow: ₦${summary.totalInflow.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Total Outflow: ₦${summary.totalOutflow.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Net Savings: ₦${summary.netSavings.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
 • Savings Rate: ${summary.savingsRatePercent}%
 
 Expense Breakdown:
-• Transport: ₦${(summary.categories['Transport'] || 0).toLocaleString()}
-• Food: ₦${(summary.categories['Food'] || 0).toLocaleString()}
-• Utilities: ₦${(summary.categories['Utilities'] || 0).toLocaleString()}
-• Shopping: ₦${(summary.categories['Shopping'] || 0).toLocaleString()}
-• Other: ₦${(summary.categories['Uncategorized'] || 0).toLocaleString()}
-
-You can now ask me any questions about your transactions, spending habits, or how to optimize your savings!`;
+• Airtime: ₦${(summary.categories['Airtime'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Mobile Data: ₦${(summary.categories['Mobile Data'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Food & Dining: ₦${(summary.categories['Food'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Transport: ₦${(summary.categories['Transport'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Utilities: ₦${(summary.categories['Utilities'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Shopping: ₦${(summary.categories['Shopping'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Bank Charges: ₦${(summary.categories['Bank Charges'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Transfers Out: ₦${(summary.categories['Transfer Out'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• POS / Merchants: ₦${(summary.categories['Merchant/POS'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+• Other: ₦${(summary.categories['Other'] || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+${summary.internalSweepsCount > 0 ? `\n• Note: ${summary.internalSweepsCount} internal OWealth / Spend & Save sweeps were excluded from expenses to prevent double-counting.\n` : ''}
+You can now ask me any specific questions about your transactions, spending habits, or how to optimize your savings!`;
 
     await sendMessage(chatId, summaryMessage);
     return NextResponse.json({ ok: true });

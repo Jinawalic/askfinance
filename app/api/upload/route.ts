@@ -3,7 +3,7 @@ export const maxDuration = 60; // Allow up to 60s on Vercel for large PDF proces
 
 import { NextRequest, NextResponse } from 'next/server';
 import { extractText } from 'unpdf';
-import { analyzeTransactions, Transaction } from '@/utils/financialRules';
+import { parseBankStatementText, computeStatementSummary } from '@/utils/statementParser';
 import { generateBatchEmbeddings } from '@/utils/embeddings';
 import { prisma } from '@/lib/db';
 
@@ -92,43 +92,28 @@ export async function POST(req: NextRequest) {
             }, { status: 422 });
         }
 
-        // 4. Extract financial transactions from statement lines
-        const detectedTransactions: Transaction[] = [];
-        const dateRegex = /\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
-        const amountRegex = /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/;
+        // 4. Extract structured financial transactions using high-precision parser
+        const detectedTransactions = parseBankStatementText(rawText);
 
-        for (const line of lines) {
-            const amountMatch = line.match(amountRegex);
-            if (amountMatch && amountMatch[0].length >= 2) {
-                const cleanAmountStr = amountMatch[0].replace(/,/g, '');
-                const amount = parseFloat(cleanAmountStr);
-                
-                if (Number.isFinite(amount) && amount > 0) {
-                    const lower = line.toLowerCase();
-                    const isDebit = lower.includes('debit') || lower.includes('dr') || lower.includes('-') || lower.includes('withdrawal');
-                    const dateMatch = line.match(dateRegex);
-                    const txDate = dateMatch ? dateMatch[0] : new Date().toISOString().split('T')[0];
-
-                    detectedTransactions.push({
-                        date: txDate,
-                        description: line.substring(0, 60).trim(),
-                        amount: amount,
-                        type: isDebit ? 'debit' : 'credit'
-                    });
-                }
-            }
-        }
-
-        // 5. Store detected transactions in database for keyword querying in chat
+        // 5. Store detected transactions in database with structured columns
         if (detectedTransactions.length > 0) {
             try {
                 await prisma.transaction.createMany({
-                    data: detectedTransactions.slice(0, 100).map((tx) => ({
+                    data: detectedTransactions.map((tx) => ({
                         sessionId: sessionId,
-                        date: tx.date,
+                        statementId: sessionId,
+                        userId: validUserId || undefined,
+                        transactionDate: tx.transactionDate,
+                        date: tx.dateStr,
                         description: tx.description,
                         amount: tx.amount,
+                        debit: tx.debit,
+                        credit: tx.credit,
+                        balanceAfter: tx.balanceAfter,
                         type: tx.type === 'debit' ? 'DEBIT' : 'CREDIT',
+                        accountSection: tx.accountSection,
+                        category: tx.category,
+                        isInternalSweep: tx.isInternalSweep,
                     }))
                 });
             } catch (txDbErr) {
@@ -167,8 +152,8 @@ export async function POST(req: NextRequest) {
             }
         }
 
-        // 7. Calculate financial statistics using financial rules engine
-        const financialSummary = analyzeTransactions(detectedTransactions);
+        // 7. Calculate financial statistics excluding internal sweeps
+        const financialSummary = computeStatementSummary(detectedTransactions);
 
         // 8. Upsert summary to Postgres safely
         await prisma.financialSummary.upsert({

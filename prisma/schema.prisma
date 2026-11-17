@@ -41,6 +41,7 @@ model User {
   email            String?            @unique
   telegramChatId   String?            @unique // linked when user sends /start <username>
   sessions         ChatSession[]
+  transactions     Transaction[]
   telegramMessages TelegramMessage[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
@@ -80,16 +81,33 @@ model Message {
 }
 
 model Transaction {
-  id          String          @id @default(uuid())
-  sessionId   String?
-  session     ChatSession?    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  date        String
-  description String
-  amount      Float
-  type        TransactionType
-  category    String?
-  risk        RiskLevel       @default(LOW)
-  createdAt   DateTime        @default(now())
+  id                String          @id @default(uuid())
+  sessionId         String?
+  session           ChatSession?    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  statementId       String?
+  userId            String?
+  user              User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactionDate   DateTime?
+  date              String
+  description       String
+  amount            Float
+  debit             Float           @default(0)
+  credit            Float           @default(0)
+  balanceAfter      Float?
+  type              TransactionType
+  accountSection    String          @default("WALLET")
+  category          String?
+  isInternalSweep   Boolean         @default(false)
+  embedding         Unsupported("vector(1024)")?
+  risk              RiskLevel       @default(LOW)
+  createdAt         DateTime        @default(now())
+
+  @@index([sessionId])
+  @@index([statementId])
+  @@index([userId])
+  @@index([transactionDate])
+  @@index([isInternalSweep])
+  @@index([category])
 }
 
 model FinancialSummary {

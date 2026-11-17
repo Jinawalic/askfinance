@@ -127,6 +127,7 @@ export async function POST(req: NextRequest) {
                 const matchedTransactions = await prisma.transaction.findMany({
                     where: {
                         sessionId: sessionId,
+                        isInternalSweep: false,
                         OR: queryWords.map(word => ({
                             description: { contains: word, mode: 'insensitive' }
                         }))
