@@ -67,7 +67,7 @@ function forwardToLocalApp(update) {
     const payload = JSON.stringify(update);
     const options = {
       hostname: '127.0.0.1',
-      port: 3000,
+      port: process.env.PORT || 3000,
       path: '/api/telegram',
       method: 'POST',
       headers: {

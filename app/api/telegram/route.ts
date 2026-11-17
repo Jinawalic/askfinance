@@ -11,7 +11,7 @@ import { analyzeTransactions, Transaction as ParsedTransaction } from '@/utils/f
 const DEFAULT_BOT_TOKEN = '8767722632:AAERn7tPHJOXgOXXiNRuT0Sf8GPsn4rwO90';
 
 function getBotToken(): string {
-  return process.env.TELEGRAM_BOT_TOKEN || DEFAULT_BOT_TOKEN;
+  return (process.env.TELEGRAM_BOT_TOKEN || DEFAULT_BOT_TOKEN).trim();
 }
 
 function getBotApi(): string {
@@ -312,25 +312,39 @@ async function handleTextMessage(chatId: number, text: string, from?: any) {
   }
 
   // 4. Persist incoming user message
-  await prisma.telegramMessage.create({
-    data: {
-      userId: user.id,
-      role: 'USER',
-      text,
-    },
-  });
+  try {
+    await prisma.telegramMessage.create({
+      data: {
+        userId: user.id,
+        role: 'USER',
+        text,
+      },
+    });
+  } catch (err) {
+    console.warn('[Telegram User Message Save Notice]:', err);
+  }
 
   // 5. Generate AI response with full financial context, RAG & Claude
-  const botReply = await generateBotResponse(user.id, text);
+  let botReply = '';
+  try {
+    botReply = await generateBotResponse(user.id, text);
+  } catch (genErr) {
+    console.error('[Telegram generateBotResponse Error]:', genErr);
+    botReply = "I am having a brief moment processing that. How can I assist you with your finances today?";
+  }
 
   // 6. Persist bot reply
-  await prisma.telegramMessage.create({
-    data: {
-      userId: user.id,
-      role: 'BOT',
-      text: botReply,
-    },
-  });
+  try {
+    await prisma.telegramMessage.create({
+      data: {
+        userId: user.id,
+        role: 'BOT',
+        text: botReply,
+      },
+    });
+  } catch (err) {
+    console.warn('[Telegram Bot Message Save Notice]:', err);
+  }
 
   // 7. Send message back to user on Telegram
   await sendMessage(chatId, botReply);
@@ -607,11 +621,16 @@ Expense Categories: ${JSON.stringify(summary.categories)}`;
   }
 
   // 4. Fetch recent chat history
-  const history = await prisma.telegramMessage.findMany({
-    where: { userId },
-    orderBy: { createdAt: 'asc' },
-    take: 20,
-  });
+  let history: Array<{ role: string; text: string }> = [];
+  try {
+    history = await prisma.telegramMessage.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+    });
+  } catch (histErr) {
+    console.warn('[Telegram History Fetch Notice]:', histErr);
+  }
 
   // Build clean alternating messages array for Anthropic
   const messages: { role: 'user' | 'assistant'; content: string }[] = [];
@@ -633,7 +652,7 @@ Expense Categories: ${JSON.stringify(summary.categories)}`;
 
   // Add current user query
   if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
-    messages[messages.length - 1].content = userQuery;
+    messages[messages.length - 1].content += '\n' + userQuery;
   } else {
     messages.push({ role: 'user', content: userQuery });
   }
